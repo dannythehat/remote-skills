@@ -37,11 +37,11 @@ users ──1:1── employers ──1:n── jobs ──1:n── job_reports
 | Table | Purpose |
 | --- | --- |
 | `users` | Everyone who signs in. `role` is `worker` or `employer`. `profile_visible` controls employer search. |
-| `employers` | Company details for an employer user. `flagged_for_review` is set by job reports. |
+| `employers` | Company details for an employer user. The database only allows this for users whose role is `employer`. `flagged_for_review` is set by job reports. |
 | `topics` | Skill areas, with a per-topic `max_attempts` limit. |
 | `task_templates` | Platform-written tasks: instructions, 30–60 min time limit, rubric, variable parts, `allows_ai`. |
 | `task_attempts` | One attempt at one generated variant. Stores the exact `variant_content` given plus a unique `variant_hash`, so no two attempts share a task and every score can be audited. Holds answer, explanation, follow-ups and score breakdown. |
-| `ledger_entries` | Public results. Append-only, one row per scored attempt, so full history is kept. |
+| `ledger_entries` | Public results, one row per scored attempt. A trigger blocks UPDATE and DELETE, so full history is kept. `user_id`/`topic_id` must match the attempt (composite foreign key). |
 | `ledger_best` (view) | Best verified score per worker per topic, read from `ledger_entries`. |
 | `jobs` | Postings. `remote_type` is `anywhere` or `timezone_overlap` (overlap text required for the latter), plus a required `remote_declaration`. |
 | `job_reports` | Worker reports that a job is not truly remote. One per worker per job. |

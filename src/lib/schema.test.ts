@@ -128,6 +128,56 @@ describe.skipIf(!databaseUrl)("database schema", () => {
     expect(best.rows[0].task_attempt_id).toBe(otherAttempt.rows[0].id);
   });
 
+  it("rejects a ledger entry whose user or topic differs from its attempt", async () => {
+    const a = await seedAttempt("hash-c1");
+    const b = await seedAttempt("hash-c2");
+    const insertEntry = (userId: string, topicId: string) =>
+      sql(
+        "INSERT INTO ledger_entries (user_id, topic_id, task_attempt_id, score) VALUES ($1, $2, $3, 50)",
+        [userId, topicId, a.attemptId],
+      );
+    await expect(insertEntry(b.userId, a.topicId)).rejects.toThrow(/foreign key/);
+    await expect(insertEntry(a.userId, b.topicId)).rejects.toThrow(/foreign key/);
+    await expect(insertEntry(a.userId, a.topicId)).resolves.toBeDefined();
+  });
+
+  it("blocks UPDATE and DELETE on ledger entries", async () => {
+    const a = await seedAttempt("hash-d1");
+    await sql(
+      "INSERT INTO ledger_entries (user_id, topic_id, task_attempt_id, score) VALUES ($1, $2, $3, 40)",
+      [a.userId, a.topicId, a.attemptId],
+    );
+    await expect(
+      sql("UPDATE ledger_entries SET score = 100 WHERE task_attempt_id = $1", [a.attemptId]),
+    ).rejects.toThrow(/append-only: UPDATE/);
+    await expect(
+      sql("DELETE FROM ledger_entries WHERE task_attempt_id = $1", [a.attemptId]),
+    ).rejects.toThrow(/append-only: DELETE/);
+    // History also survives deleting the worker or the attempt.
+    await expect(sql("DELETE FROM users WHERE id = $1", [a.userId])).rejects.toThrow(/foreign key/);
+    await expect(sql("DELETE FROM task_attempts WHERE id = $1", [a.attemptId])).rejects.toThrow(/foreign key/);
+  });
+
+  it("only lets users with the employer role have an employer row", async () => {
+    const worker = await sql(
+      "INSERT INTO users (email, display_name, role) VALUES ('w-emp@example.com', 'W', 'worker') RETURNING id",
+    );
+    await expect(
+      sql("INSERT INTO employers (user_id, company_name) VALUES ($1, 'Co')", [worker.rows[0].id]),
+    ).rejects.toThrow(/foreign key/);
+    await expect(
+      sql("INSERT INTO employers (user_id, user_role, company_name) VALUES ($1, 'worker', 'Co')", [worker.rows[0].id]),
+    ).rejects.toThrow(/user_role/);
+
+    const boss = await sql(
+      "INSERT INTO users (email, display_name, role) VALUES ('e-emp@example.com', 'E', 'employer') RETURNING id",
+    );
+    await sql("INSERT INTO employers (user_id, company_name) VALUES ($1, 'Co')", [boss.rows[0].id]);
+    await expect(
+      sql("UPDATE users SET role = 'worker' WHERE id = $1", [boss.rows[0].id]),
+    ).rejects.toThrow(/foreign key/);
+  });
+
   it("only accepts truly remote job declarations", async () => {
     const user = await sql(
       "INSERT INTO users (email, display_name, role) VALUES ('boss@example.com', 'B', 'employer') RETURNING id",

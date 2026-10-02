@@ -8,19 +8,25 @@ CREATE TABLE users (
   role text NOT NULL CHECK (role IN ('worker', 'employer')),
   -- Workers choose whether employers can see their ledger (Ticket 8).
   profile_visible boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  -- Target for employers' (user_id, user_role) foreign key.
+  UNIQUE (id, role)
 );
 CREATE UNIQUE INDEX users_email_key ON users (lower(email));
 
 -- Company details for a user with the employer role.
 CREATE TABLE employers (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL UNIQUE REFERENCES users (id) ON DELETE CASCADE,
+  user_id uuid NOT NULL UNIQUE,
+  -- Always 'employer'. With the foreign key below, the database refuses an
+  -- employer row for a worker, and refuses changing such a user's role.
+  user_role text NOT NULL DEFAULT 'employer' CHECK (user_role = 'employer'),
   company_name text NOT NULL,
   website text,
   -- Set when worker reports say a job is not truly remote.
   flagged_for_review boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (user_id, user_role) REFERENCES users (id, role) ON DELETE CASCADE
 );
 
 -- Skill areas workers can prove, e.g. "Using AI at work".
@@ -76,23 +82,41 @@ CREATE TABLE task_attempts (
   score_breakdown jsonb,
   scored_at timestamptz,
   CHECK (deadline_at > started_at),
-  CHECK (status <> 'scored' OR (score IS NOT NULL AND scored_at IS NOT NULL))
+  CHECK (status <> 'scored' OR (score IS NOT NULL AND scored_at IS NOT NULL)),
+  -- Target for ledger_entries' composite foreign key.
+  UNIQUE (id, user_id, topic_id)
 );
 CREATE INDEX task_attempts_user_topic_idx ON task_attempts (user_id, topic_id);
 CREATE INDEX task_attempts_template_idx ON task_attempts (task_template_id);
 
 -- Public results. Append-only history: one row per scored attempt.
+-- Rows can never be changed or removed, so a user or attempt with ledger
+-- history cannot be deleted either (RESTRICT below, plus the trigger).
 CREATE TABLE ledger_entries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
   topic_id uuid NOT NULL REFERENCES topics (id) ON DELETE RESTRICT,
-  task_attempt_id uuid NOT NULL UNIQUE REFERENCES task_attempts (id) ON DELETE CASCADE,
+  task_attempt_id uuid NOT NULL UNIQUE,
   score numeric(5, 2) NOT NULL CHECK (score BETWEEN 0 AND 100),
+  -- Set at insert time. It cannot be flipped later.
   verified boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  -- user_id and topic_id must match the attempt the entry came from.
+  FOREIGN KEY (task_attempt_id, user_id, topic_id)
+    REFERENCES task_attempts (id, user_id, topic_id) ON DELETE RESTRICT
 );
 CREATE INDEX ledger_entries_user_topic_idx ON ledger_entries (user_id, topic_id);
 CREATE INDEX ledger_entries_topic_score_idx ON ledger_entries (topic_id, score DESC);
+
+CREATE FUNCTION ledger_entries_block_changes() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'ledger_entries is append-only: % is not allowed', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ledger_entries_append_only
+  BEFORE UPDATE OR DELETE ON ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION ledger_entries_block_changes();
 
 -- Best verified result per worker per topic (core rule 6). Ties go to the earliest.
 CREATE VIEW ledger_best AS
@@ -141,6 +165,7 @@ DROP TABLE job_reports;
 DROP TABLE jobs;
 DROP VIEW ledger_best;
 DROP TABLE ledger_entries;
+DROP FUNCTION ledger_entries_block_changes();
 DROP TABLE task_attempts;
 DROP TABLE task_templates;
 DROP TABLE topics;
